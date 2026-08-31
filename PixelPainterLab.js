@@ -1,437 +1,463 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Paintbrush, Grid, Droplet, Maximize, Minimize, Download, Info, Layers, Palette } from 'lucide-react';
 
-const PixelArtPainter = () => {
-  const [image, setImage] = useState(null);
-  const [pixelSize, setPixelSize] = useState(32); // Cantidad de píxeles de ancho
-  const [colorTolerance, setColorTolerance] = useState(15); // Nuevo: Tolerancia de color (0-50)
-  const [selectedColor, setSelectedColor] = useState(null);
-  const [showGrid, setShowGrid] = useState(true);
-  const [highlightSimilar, setHighlightSimilar] = useState(true);
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [matchingPixelsCount, setMatchingPixelsCount] = useState(0);
-  
-  const canvasRef = useRef(null);
-  const originalImageRef = useRef(null);
-  const lowResDataRef = useRef(null);
+import sys
 
-  // Paleta de mezcla
-  const [mixingRecipe, setMixingRecipe] = useState({ c: 0, m: 0, y: 0, k: 0, w: 0 });
+import numpy as np
+from PIL import Image
 
-  // Cargar imagen
-  const handleImageUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-          originalImageRef.current = img;
-          setImage(img);
-          setSelectedColor(null);
-          setMatchingPixelsCount(0);
-        };
-        img.src = event.target.result;
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+from PySide6.QtCore import Qt, Signal, QRect
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QFont
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QSlider, QFileDialog, QScrollArea,
+    QHBoxLayout, QVBoxLayout, QFrame, QCheckBox, QSizePolicy, QMessageBox,
+)
 
-  // Función maestra de renderizado
-  const renderCanvas = () => {
-    const img = originalImageRef.current;
-    if (!img) return;
+# ------------------------------------------------------------------ motor
+def kmeans(X, k, max_iter=30, seed=None):
+    rng = np.random.default_rng(seed)
+    n = len(X)
+    if n == 0 or k <= 0:
+        return np.zeros(0, dtype=int), np.zeros((0, 3))
+    k = min(k, n)
+    centers = [X[rng.integers(n)]]
+    for _ in range(1, k):
+        d2 = np.min(np.stack([np.sum((X - c) ** 2, axis=1) for c in centers]), axis=0)
+        s = d2.sum()
+        probs = d2 / s if s > 0 else np.full(n, 1.0 / n)
+        centers.append(X[rng.choice(n, p=probs)])
+    C = np.array(centers, dtype=float)
+    labels = np.full(n, -1, dtype=int)
+    for _ in range(max_iter):
+        dists = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
+        new = np.argmin(dists, axis=1)
+        for c in range(k):
+            m = new == c
+            if m.any():
+                C[c] = X[m].mean(axis=0)
+        if np.array_equal(new, labels):
+            labels = new
+            break
+        labels = new
+    return labels, C
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
 
-    const aspectRatio = img.width / img.height;
-    const canvasWidth = 500; 
-    const canvasHeight = canvasWidth / aspectRatio;
+def recipe(r, g, b):
+    """Mezcla aproximada {w,c,m,y,k} en % (pasos de 5, suma 100)."""
+    R, G, B = r / 255, g / 255, b / 255
+    k = 1 - max(R, G, B)
+    denom = (1 - k) or 1
+    c = (1 - R - k) / denom
+    m = (1 - G - k) / denom
+    y = (1 - B - k) / denom
+    w = min(R, G, B)
+    raw = {"w": w, "c": c * (1 - w), "m": m * (1 - w), "y": y * (1 - w), "k": k}
+    s = sum(raw.values()) or 1
+    arr = [[key, round(raw[key] / s * 100 / 5) * 5] for key in raw]
+    total = sum(v for _, v in arr)
+    arr.sort(key=lambda p: -p[1])
+    i = guard = 0
+    while total != 100 and guard < 60:
+        p = arr[i % len(arr)]
+        if total < 100:
+            p[1] += 5; total += 5
+        elif p[1] >= 5:
+            p[1] -= 5; total -= 5
+        i += 1; guard += 1
+    return {key: v for key, v in arr}
 
-    if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
-      setCanvasSize({ width: canvasWidth, height: canvasHeight });
-      canvas.width = canvasWidth;
-      canvas.height = canvasHeight;
-    }
 
-    // --- Paso 1: Generar datos de píxeles (Low Res) ---
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = pixelSize;
-    tempCanvas.height = Math.round(pixelSize / aspectRatio);
-    const tempCtx = tempCanvas.getContext('2d');
-    
-    // Dibujar imagen reducida
-    tempCtx.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
-    
-    // Obtener datos crudos
-    const pixelData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-    const data = pixelData.data;
+MIX_INFO = {"w": ("Blanco", "#f1f5f9"), "c": ("Cian", "#06b6d4"),
+            "m": ("Magenta", "#d946ef"), "y": ("Amarillo", "#facc15"), "k": ("Negro", "#0f172a")}
 
-    // --- NUEVO: Estandarizar Colores (Quantization) ---
-    // Redondeamos los valores RGB para agrupar colores similares
-    // El 'step' determina cuán agresiva es la agrupación (ej. step 25 significa que colores entre 0-25 son iguales)
-    const step = Math.max(1, colorTolerance * 2.55); // Mapear 0-100 a 0-255 aprox
 
-    for (let i = 0; i < data.length; i += 4) {
-        // Redondear cada canal al múltiplo más cercano del 'step'
-        data[i] = Math.round(data[i] / step) * step;     // R
-        data[i+1] = Math.round(data[i+1] / step) * step; // G
-        data[i+2] = Math.round(data[i+2] / step) * step; // B
-        // Alpha se queda igual (data[i+3])
-    }
-    
-    // Volvemos a poner los datos "simplificados" en el canvas temporal
-    tempCtx.putImageData(pixelData, 0, 0);
-    
-    // Guardamos los datos estandarizados para análisis
-    lowResDataRef.current = pixelData;
+def hexc(r, g, b):
+    return f"#{int(r):02X}{int(g):02X}{int(b):02X}"
 
-    // --- Paso 2: Dibujar imagen escalada al canvas visible ---
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, 0, 0, canvasWidth, canvasHeight);
 
-    // --- Paso 3: Resaltar píxeles idénticos ---
-    if (selectedColor && highlightSimilar) {
-        highlightMatchingPixels(ctx, pixelData, tempCanvas.width, tempCanvas.height, canvasWidth, canvasHeight);
-    }
+# ------------------------------------------------------------------ lienzo
+class Canvas(QWidget):
+    seleccion = Signal(int)
 
-    // --- Paso 4: Dibujar cuadrícula ---
-    if (showGrid) {
-      drawGrid(ctx, canvasWidth, canvasHeight, tempCanvas.width, tempCanvas.height);
-    }
-  };
+    def __init__(self):
+        super().__init__()
+        self.cols = 0
+        self.rows = 0
+        self.cell_labels = None       # np array (rows*cols,)
+        self.palette = []             # [{r,g,b,hex,count,recipe}]
+        self.show_grid = True
+        self.show_num = True
+        self.highlight = True
+        self.selected = None
+        self.disp_w = 540
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
-  const highlightMatchingPixels = (ctx, pixelData, cols, rows, width, height) => {
-    const data = pixelData.data;
-    const cellWidth = width / cols;
-    const cellHeight = height / rows;
-    let count = 0;
+    def set_data(self, cols, rows, labels, palette):
+        self.cols, self.rows = cols, rows
+        self.cell_labels = labels
+        self.palette = palette
+        self._resize()
+        self.update()
 
-    const targetR = selectedColor.r;
-    const targetG = selectedColor.g;
-    const targetB = selectedColor.b;
+    def _resize(self):
+        if not self.cols:
+            return
+        cw = self.disp_w / self.cols
+        self.setFixedSize(int(self.disp_w), int(cw * self.rows))
 
-    // Usamos un color de resalte dinámico según si el pixel es oscuro o claro para contraste
-    const isDark = (targetR + targetG + targetB) / 3 < 128;
-    ctx.strokeStyle = isDark ? '#00ff00' : '#ff00ff'; // Verde para oscuros, Magenta para claros
-    ctx.lineWidth = 2;
-    ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.25)' : 'rgba(0, 0, 0, 0.25)';
+    def _cw(self):
+        return self.disp_w / self.cols if self.cols else 1
 
-    for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-            const i = (y * cols + x) * 4;
-            if (data[i] === targetR && data[i+1] === targetG && data[i+2] === targetB) {
-                count++;
-                ctx.fillRect(x * cellWidth, y * cellHeight, cellWidth, cellHeight);
-                ctx.strokeRect(x * cellWidth, y * cellHeight, cellWidth, cellHeight);
-            }
-        }
-    }
-    
-    if (count !== matchingPixelsCount) setMatchingPixelsCount(count);
-  };
+    def paintEvent(self, _):
+        if not self.cols or self.cell_labels is None:
+            return
+        cw = self._cw()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        # celdas via QImage a resolución de rejilla, escalado nearest
+        img = QImage(self.cols, self.rows, QImage.Format.Format_RGB32)
+        for y in range(self.rows):
+            for x in range(self.cols):
+                col = self.palette[self.cell_labels[y * self.cols + x]]
+                img.setPixelColor(x, y, QColor(col["r"], col["g"], col["b"]))
+        p.drawImage(QRect(0, 0, int(cw * self.cols), int(cw * self.rows)), img)
 
-  const drawGrid = (ctx, width, height, cols, rows) => {
-    ctx.strokeStyle = 'rgba(128, 128, 128, 0.3)';
-    ctx.lineWidth = 1;
-    const cellWidth = width / cols;
-    const cellHeight = height / rows;
-    
-    ctx.beginPath();
-    for (let i = 0; i <= cols; i++) {
-      ctx.moveTo(i * cellWidth, 0); ctx.lineTo(i * cellWidth, height);
-    }
-    for (let i = 0; i <= rows; i++) {
-      ctx.moveTo(0, i * cellHeight); ctx.lineTo(width, i * cellHeight);
-    }
-    ctx.stroke();
-  };
+        W, H = cw * self.cols, cw * self.rows
+        # resaltar
+        if self.highlight and self.selected is not None:
+            col = self.palette[self.selected]
+            dark = (col["r"] + col["g"] + col["b"]) / 3 < 128
+            p.setPen(QPen(QColor("#22ff88") if dark else QColor("#ff2fd6"), 2))
+            fill = QColor(255, 255, 255, 64) if dark else QColor(0, 0, 0, 56)
+            for y in range(self.rows):
+                for x in range(self.cols):
+                    if self.cell_labels[y * self.cols + x] == self.selected:
+                        p.fillRect(int(x * cw), int(y * cw), int(cw) + 1, int(cw) + 1, fill)
+                        p.drawRect(int(x * cw) + 1, int(y * cw) + 1, int(cw) - 2, int(cw) - 2)
+        # cuadrícula
+        if self.show_grid:
+            p.setPen(QPen(QColor(120, 130, 150, 90), 1))
+            for i in range(self.cols + 1):
+                p.drawLine(int(i * cw), 0, int(i * cw), int(H))
+            for i in range(self.rows + 1):
+                p.drawLine(0, int(i * cw), int(W), int(i * cw))
+        # números
+        if self.show_num and cw >= 9:
+            f = QFont("Segoe UI"); f.setPixelSize(max(6, int(cw * 0.5)))
+            p.setFont(f)
+            for y in range(self.rows):
+                for x in range(self.cols):
+                    col = self.palette[self.cell_labels[y * self.cols + x]]
+                    dark = (col["r"] + col["g"] + col["b"]) / 3 < 128
+                    p.setPen(QColor(255, 255, 255, 200) if dark else QColor(0, 0, 0, 175))
+                    p.drawText(QRect(int(x * cw), int(y * cw), int(cw), int(cw)),
+                               Qt.AlignmentFlag.AlignCenter, str(self.cell_labels[y * self.cols + x] + 1))
 
-  useEffect(() => {
-    renderCanvas();
-  }, [image, pixelSize, colorTolerance, showGrid, selectedColor, highlightSimilar]);
+    def mousePressEvent(self, e):
+        if not self.cols or self.cell_labels is None:
+            return
+        cw = self._cw()
+        x, y = int(e.position().x() / cw), int(e.position().y() / cw)
+        if 0 <= x < self.cols and 0 <= y < self.rows:
+            self.selected = int(self.cell_labels[y * self.cols + x])
+            self.update()
+            self.seleccion.emit(self.selected)
 
-  // --- NUEVO: Cálculo de Receta Redondeada ---
-  const calculateMixingRecipe = (r, g, b) => {
-    let rNorm = r / 255;
-    let gNorm = g / 255;
-    let bNorm = b / 255;
-    let k = 1 - Math.max(rNorm, gNorm, bNorm);
-    let c = (1 - rNorm - k) / (1 - k) || 0;
-    let m = (1 - gNorm - k) / (1 - k) || 0;
-    let y = (1 - bNorm - k) / (1 - k) || 0;
-    
-    const lightness = (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
-    let w = 0;
-    if (lightness > 127) w = (lightness - 127) / 128;
-    if (w > 0.5) k = k * 0.5;
 
-    // Función auxiliar para redondear al 5% más cercano
-    const roundTo5 = (num) => Math.round(num / 5) * 5;
+# ------------------------------------------------------------------ barra de mezcla
+class MixBar(QWidget):
+    def __init__(self, nombre, color, pct):
+        super().__init__()
+        self.nombre, self.color, self.pct = nombre, QColor(color), pct
+        self.setFixedHeight(34)
 
-    setMixingRecipe({
-      c: roundTo5(c * 100),
-      m: roundTo5(m * 100),
-      y: roundTo5(y * 100),
-      k: roundTo5(k * 100),
-      w: roundTo5(w * 100)
-    });
-  };
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        p.setPen(QColor("#94a3b8")); f = QFont("Segoe UI"); f.setPixelSize(11); p.setFont(f)
+        p.drawText(QRect(0, 0, w, 14), Qt.AlignmentFlag.AlignLeft, self.nombre)
+        p.drawText(QRect(0, 0, w, 14), Qt.AlignmentFlag.AlignRight, f"{self.pct}%")
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#0f172a")); p.drawRoundedRect(0, 18, w, 14, 7, 7)
+        p.setBrush(self.color); p.drawRoundedRect(0, 18, int(w * self.pct / 100), 14, 7, 7)
 
-  const handleCanvasClick = (e) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !lowResDataRef.current) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
+# ------------------------------------------------------------------ ventana
+class PixelPainter(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PixelPainter Lab")
+        self.resize(1120, 780)
+        self.setStyleSheet(ESTILO)
 
-    const imgAspect = originalImageRef.current.width / originalImageRef.current.height;
-    const cols = pixelSize;
-    const rows = Math.round(pixelSize / imgAspect);
-    
-    const cellWidth = canvas.width / cols;
-    const cellHeight = canvas.height / rows;
-    
-    const gridX = Math.floor(clickX / cellWidth);
-    const gridY = Math.floor(clickY / cellHeight);
+        self.img_arr = None       # np array HxWx3 de la imagen original
+        self.cols = 40
+        self.selected = None
 
-    if (gridX < 0 || gridX >= cols || gridY < 0 || gridY >= rows) return;
+        root = QVBoxLayout(self); root.setContentsMargins(18, 16, 18, 14)
+        t = QLabel("PixelPainter <span style='color:#8b5cf6'>Lab</span>"); t.setObjectName("h1")
+        root.addWidget(t)
+        sub = QLabel("Convierte una imagen en una guía para pintar por números: elige cuántos "
+                     "colores y obtén la cuadrícula numerada y la receta de cada pintura.")
+        sub.setObjectName("muted"); sub.setWordWrap(True); root.addWidget(sub)
 
-    const data = lowResDataRef.current.data;
-    const index = (gridY * cols + gridX) * 4;
-    
-    const color = {
-      r: data[index],
-      g: data[index + 1],
-      b: data[index + 2],
-      hex: rgbToHex(data[index], data[index + 1], data[index + 2]),
-      x: gridX + 1,
-      y: gridY + 1
-    };
+        cols = QHBoxLayout(); cols.setSpacing(16); root.addLayout(cols, 1)
 
-    // Permitir re-seleccionar para asegurar actualización si el usuario cambia parámetros
-    setMatchingPixelsCount(0); 
-    setSelectedColor(color);
-    calculateMixingRecipe(color.r, color.g, color.b);
-  };
+        # ---- panel izquierdo: controles ----
+        left = QVBoxLayout(); left.setSpacing(12)
+        self.btn_open = QPushButton("⬆  Subir imagen"); self.btn_open.setObjectName("accent")
+        self.btn_open.clicked.connect(self._abrir); left.addWidget(self.btn_open)
 
-  const rgbToHex = (r, g, b) => {
-    return "#" + [r, g, b].map(x => {
-      const hex = x.toString(16);
-      return hex.length === 1 ? "0" + hex : hex;
-    }).join("");
-  };
+        self.res_lbl = QLabel("Resolución: 40 px"); self.res_lbl.setObjectName("ctl")
+        left.addWidget(self.res_lbl)
+        self.res = QSlider(Qt.Orientation.Horizontal); self.res.setMinimum(10); self.res.setMaximum(100)
+        self.res.setValue(40); self.res.valueChanged.connect(self._res_changed); left.addWidget(self.res)
 
-  const downloadCanvas = () => {
-    const canvas = canvasRef.current;
-    const link = document.createElement('a');
-    link.download = 'guia-pixelart-pintura.png';
-    link.href = canvas.toDataURL();
-    link.click();
-  };
+        self.col_lbl = QLabel("Nº de colores: 12"); self.col_lbl.setObjectName("ctl")
+        left.addWidget(self.col_lbl)
+        self.ncolors = QSlider(Qt.Orientation.Horizontal); self.ncolors.setMinimum(2); self.ncolors.setMaximum(24)
+        self.ncolors.setValue(12); self.ncolors.valueChanged.connect(self._col_changed); left.addWidget(self.ncolors)
 
-  return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans p-4 md:p-8">
-      <div className="max-w-6xl mx-auto">
-        
-        <header className="mb-8 text-center">
-          <h1 className="text-4xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent mb-2">
-            PixelPainter Lab
-          </h1>
-          <p className="text-slate-400">
-            Estandariza tus colores y obtén recetas de mezcla simplificadas.
-          </p>
-        </header>
+        self.cb_grid = QCheckBox("Cuadrícula"); self.cb_grid.setChecked(True); self.cb_grid.toggled.connect(self._opts)
+        self.cb_num = QCheckBox("Números"); self.cb_num.setChecked(True); self.cb_num.toggled.connect(self._opts)
+        self.cb_high = QCheckBox("Resaltar iguales"); self.cb_high.setChecked(True); self.cb_high.toggled.connect(self._opts)
+        for cb in (self.cb_grid, self.cb_num, self.cb_high):
+            left.addWidget(cb)
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Controles */}
-          <div className="lg:col-span-3 space-y-6">
-            <div className="bg-slate-800 p-6 rounded-xl shadow-lg border border-slate-700">
-              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-slate-600 border-dashed rounded-lg cursor-pointer hover:bg-slate-700/50 transition-colors">
-                <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                  <Upload className="w-8 h-8 mb-3 text-slate-400" />
-                  <p className="text-sm text-slate-400"><span className="font-semibold">Sube tu imagen</span></p>
-                  <p className="text-xs text-slate-500">JPG, PNG</p>
-                </div>
-                <input type="file" className="hidden" onChange={handleImageUpload} accept="image/*" />
-              </label>
-            </div>
+        self.btn_png = QPushButton("⬇  Descargar guía (PNG)"); self.btn_png.setObjectName("accent")
+        self.btn_png.clicked.connect(self._descargar); self.btn_png.setEnabled(False)
+        self.btn_print = QPushButton("🖨  Guía imprimible (con leyenda)"); self.btn_print.setObjectName("ghost")
+        self.btn_print.clicked.connect(self._imprimible); self.btn_print.setEnabled(False)
+        left.addWidget(self.btn_png); left.addWidget(self.btn_print)
+        left.addStretch()
+        lw = QWidget(); lw.setLayout(left); lw.setFixedWidth(230)
+        cols.addWidget(lw)
 
-            {image && (
-              <div className="bg-slate-800 p-6 rounded-xl shadow-lg border border-slate-700 space-y-6">
-                
-                {/* Slider Resolución */}
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
-                      <Maximize size={16} /> Resolución
-                    </label>
-                    <span className="text-xs bg-violet-600 px-2 py-1 rounded text-white font-bold">{pixelSize} px</span>
-                  </div>
-                  <input 
-                    type="range" min="10" max="100" value={pixelSize} 
-                    onChange={(e) => setPixelSize(parseInt(e.target.value))}
-                    className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-violet-500"
-                  />
-                </div>
+        # ---- centro: lienzo ----
+        self.canvas = Canvas(); self.canvas.seleccion.connect(self._on_select)
+        scroll = QScrollArea(); scroll.setWidgetResizable(False); scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll.setWidget(self.canvas); scroll.setObjectName("cscroll")
+        self.placeholder = QLabel("🖌️\nSube una imagen para comenzar"); self.placeholder.setObjectName("ph")
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.canvas.setVisible(False)
+        center = QVBoxLayout(); center.addWidget(self.placeholder, 1); center.addWidget(scroll, 3)
+        cw = QWidget(); cw.setLayout(center); cols.addWidget(cw, 1)
 
-                {/* Slider Estandarización (Nuevo) */}
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-sm font-medium text-slate-300 flex items-center gap-2 text-yellow-400">
-                      <Palette size={16} /> Agrupar Colores
-                    </label>
-                    <span className="text-xs bg-yellow-600 px-2 py-1 rounded text-white font-bold">{colorTolerance}%</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="40" value={colorTolerance} 
-                    onChange={(e) => setColorTolerance(parseInt(e.target.value))}
-                    className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-yellow-500"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Sube este valor para eliminar pequeñas variaciones de color.
-                  </p>
-                </div>
+        # ---- derecha: paleta + receta ----
+        right = QVBoxLayout(); right.setSpacing(12)
+        self.pal_title = QLabel("🎨  Paleta"); self.pal_title.setObjectName("h3")
+        right.addWidget(self.pal_title)
+        self.pal_area = QScrollArea(); self.pal_area.setWidgetResizable(True); self.pal_area.setObjectName("palscroll")
+        self.pal_host = QWidget(); self.pal_lay = QVBoxLayout(self.pal_host); self.pal_lay.setSpacing(4); self.pal_lay.addStretch()
+        self.pal_area.setWidget(self.pal_host); self.pal_area.setFixedHeight(280)
+        right.addWidget(self.pal_area)
 
-                {/* Botones Toggle */}
-                <div className="space-y-3 pt-2 border-t border-slate-700">
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
-                      <Grid size={16} /> Mostrar Guía
-                    </label>
-                    <button 
-                      onClick={() => setShowGrid(!showGrid)}
-                      className={`w-12 h-6 rounded-full transition-colors relative ${showGrid ? 'bg-violet-500' : 'bg-slate-600'}`}
-                    >
-                      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${showGrid ? 'left-7' : 'left-1'}`}></div>
-                    </button>
-                  </div>
+        self.rec_host = QFrame(); self.rec_host.setObjectName("card")
+        self.rec_lay = QVBoxLayout(self.rec_host)
+        self.rec_title = QLabel("🖌️  Receta de mezcla"); self.rec_title.setObjectName("h3")
+        self.rec_lay.addWidget(self.rec_title)
+        self.rec_swatch = QFrame(); self.rec_swatch.setFixedHeight(48); self.rec_swatch.setStyleSheet("border-radius:8px; border:1px solid #334155;")
+        self.rec_lay.addWidget(self.rec_swatch)
+        self.rec_info = QLabel("Selecciona un color."); self.rec_info.setObjectName("muted"); self.rec_info.setWordWrap(True)
+        self.rec_lay.addWidget(self.rec_info)
+        self.rec_bars = QVBoxLayout(); self.rec_lay.addLayout(self.rec_bars)
+        self.rec_note = QLabel("Mezcla aproximada (pasos de 5%, suma 100%)."); self.rec_note.setObjectName("muted"); self.rec_note.setWordWrap(True)
+        self.rec_lay.addWidget(self.rec_note)
+        self.rec_host.setVisible(False)
+        right.addWidget(self.rec_host); right.addStretch()
+        rw = QWidget(); rw.setLayout(right); rw.setFixedWidth(300)
+        cols.addWidget(rw)
 
-                  <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
-                      <Layers size={16} /> Resaltar Iguales
-                    </label>
-                    <button 
-                      onClick={() => setHighlightSimilar(!highlightSimilar)}
-                      className={`w-12 h-6 rounded-full transition-colors relative ${highlightSimilar ? 'bg-pink-500' : 'bg-slate-600'}`}
-                    >
-                      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${highlightSimilar ? 'left-7' : 'left-1'}`}></div>
-                    </button>
-                  </div>
-                </div>
+        self.status = QLabel("Sube una imagen para empezar.  ·  por KALEVI LATVA AIJO ALEGRIA")
+        self.status.setObjectName("status"); root.addWidget(self.status)
 
-                <button onClick={downloadCanvas} className="w-full py-2 flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium">
-                  <Download size={16} /> Descargar Guía
-                </button>
-              </div>
-            )}
-          </div>
+        self.palette = []
+        self.cell_labels = None
+        self.rows = 0
 
-          {/* Canvas Central */}
-          <div className="lg:col-span-6 flex flex-col items-center justify-start min-h-[500px]">
-            {image ? (
-              <div className="relative shadow-2xl rounded-lg overflow-hidden border-4 border-slate-800 bg-slate-800">
-                <canvas 
-                  ref={canvasRef} 
-                  onClick={handleCanvasClick}
-                  className="cursor-crosshair max-w-full h-auto block"
-                />
-                {!selectedColor && (
-                  <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-black/70 px-4 py-2 rounded-full text-sm backdrop-blur-sm pointer-events-none flex items-center gap-2 w-max border border-slate-600">
-                    <Droplet size={14} className="text-yellow-400" /> Toca un color para ver su receta
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-50">
-                <Paintbrush size={64} className="mb-4" />
-                <p>Sube una imagen para comenzar</p>
-              </div>
-            )}
-          </div>
+    # ---------------- carga y proceso ----------------
+    def _abrir(self):
+        ruta, _ = QFileDialog.getOpenFileName(self, "Subir imagen", "",
+                                              "Imágenes (*.png *.jpg *.jpeg *.bmp *.webp *.gif)")
+        if not ruta:
+            return
+        try:
+            img = Image.open(ruta).convert("RGB")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"No se pudo abrir la imagen:\n{e}")
+            return
+        self.img_arr = np.asarray(img, dtype=float)
+        self.selected = None
+        self.canvas.setVisible(True); self.placeholder.setVisible(False)
+        self.btn_png.setEnabled(True); self.btn_print.setEnabled(True)
+        self._procesar()
 
-          {/* Panel Derecho */}
-          <div className="lg:col-span-3">
-            <div className="bg-slate-800 rounded-xl shadow-lg border border-slate-700 overflow-hidden h-full">
-              <div className="bg-slate-750 p-4 border-b border-slate-700 flex items-center gap-2">
-                <Paintbrush className="text-violet-400" size={20} />
-                <h3 className="font-bold text-lg">Datos de Pintura</h3>
-              </div>
-              
-              <div className="p-6">
-                {selectedColor ? (
-                  <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    
-                    {/* Estadísticas */}
-                    <div className="flex items-start gap-4">
-                      <div 
-                        className="w-20 h-20 rounded-lg shadow-inner border border-slate-600 flex-shrink-0"
-                        style={{ backgroundColor: selectedColor.hex }}
-                      ></div>
-                      <div>
-                        <p className="text-xs text-slate-400 uppercase tracking-wider">Píxeles Iguales</p>
-                        <div className="mt-1">
-                           <p className="text-4xl font-bold text-green-400">{matchingPixelsCount}</p>
-                        </div>
-                        <p className="text-xs text-slate-500 font-mono mt-2">{selectedColor.hex}</p>
-                      </div>
-                    </div>
+    def _procesar(self):
+        if self.img_arr is None:
+            return
+        h, w, _ = self.img_arr.shape
+        aspect = w / h
+        cols = self.res.value()
+        rows = max(1, round(cols / aspect))
+        # muestrear a la rejilla con PIL (rápido y suave)
+        small = Image.fromarray(self.img_arr.astype(np.uint8)).resize((cols, rows), Image.BILINEAR)
+        cells = np.asarray(small, dtype=float).reshape(-1, 3)
+        k = min(self.ncolors.value(), len(cells))
+        labels, C = kmeans(cells, k)
+        counts = np.bincount(labels, minlength=len(C))
+        orden = [i for i in np.argsort(-counts) if counts[i] > 0]
+        remap = {old: nuevo for nuevo, old in enumerate(orden)}
+        self.cell_labels = np.array([remap[l] for l in labels])
+        self.cols, self.rows = cols, rows
+        self.palette = []
+        for old in orden:
+            r, g, b = [int(round(v)) for v in C[old]]
+            self.palette.append({"r": r, "g": g, "b": b, "hex": hexc(r, g, b),
+                                 "count": int(counts[old]), "recipe": recipe(r, g, b)})
+        if self.selected is not None and self.selected >= len(self.palette):
+            self.selected = None
+        self.canvas.selected = self.selected
+        self.canvas.set_data(cols, rows, self.cell_labels, self.palette)
+        self._render_palette()
+        self._render_recipe()
+        self.status.setText(f"{cols}×{rows} celdas · {len(self.palette)} pinturas")
 
-                    <div className="bg-slate-900/50 p-3 rounded border border-slate-700/50">
-                        <p className="text-xs text-slate-400">
-                            Los colores están <span className="text-yellow-400">simplificados</span>. Pinta estos {matchingPixelsCount} cuadros exactamente con la misma mezcla.
-                        </p>
-                    </div>
+    # ---------------- paneles ----------------
+    def _render_palette(self):
+        self.pal_title.setText(f"🎨  Paleta ({len(self.palette)} pinturas)")
+        while self.pal_lay.count() > 1:
+            it = self.pal_lay.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for i, p in enumerate(self.palette):
+            row = QFrame(); row.setObjectName("paint")
+            row.setProperty("sel", i == self.selected)
+            row.setStyleSheet("")  # forzar re-eval de estilo
+            h = QHBoxLayout(row); h.setContentsMargins(6, 4, 6, 4); h.setSpacing(8)
+            num = QLabel(str(i + 1)); num.setObjectName("pnum"); num.setFixedSize(22, 22)
+            num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sw = QFrame(); sw.setFixedSize(28, 28); sw.setStyleSheet(f"background:{p['hex']}; border-radius:6px; border:1px solid #334155;")
+            meta = QLabel(f"<b style='font-family:Consolas'>{p['hex']}</b><br><span style='color:#94a3b8;font-size:11px'>{p['count']} celdas</span>")
+            h.addWidget(num); h.addWidget(sw); h.addWidget(meta); h.addStretch()
+            row.mousePressEvent = (lambda e, idx=i: self._on_select(idx))
+            if i == self.selected:
+                row.setStyleSheet("QFrame#paint { border:1px solid #8b5cf6; background:#0f172a; border-radius:8px; }")
+            self.pal_lay.insertWidget(self.pal_lay.count() - 1, row)
 
-                    <div className="h-px bg-slate-700"></div>
+    def _render_recipe(self):
+        while self.rec_bars.count():
+            it = self.rec_bars.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        if self.selected is None:
+            self.rec_host.setVisible(False)
+            return
+        self.rec_host.setVisible(True)
+        p = self.palette[self.selected]
+        self.rec_swatch.setStyleSheet(f"background:{p['hex']}; border-radius:8px; border:1px solid #334155;")
+        self.rec_info.setText(f"Pintura <b>#{self.selected + 1}</b> · <span style='font-family:Consolas'>{p['hex']}</span> · "
+                              f"<b style='color:#34d399'>{p['count']}</b> celdas")
+        for key in ("w", "c", "m", "y", "k"):
+            if p["recipe"][key] > 0:
+                nombre, color = MIX_INFO[key]
+                self.rec_bars.addWidget(MixBar(nombre, color, p["recipe"][key]))
 
-                    {/* Receta */}
-                    <div>
-                      <h4 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                        <Info size={14} /> Receta (Pasos de 5%)
-                      </h4>
-                      
-                      <div className="space-y-3">
-                        <MixBar label="Blanco" color="bg-white" value={mixingRecipe.w} textColor="text-slate-900" />
-                        <MixBar label="Cian" color="bg-cyan-500" value={mixingRecipe.c} />
-                        <MixBar label="Magenta" color="bg-fuchsia-500" value={mixingRecipe.m} />
-                        <MixBar label="Amarillo" color="bg-yellow-400" value={mixingRecipe.y} textColor="text-slate-900" />
-                        <MixBar label="Negro" color="bg-black" value={mixingRecipe.k} />
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="text-center text-slate-500 py-10">
-                    <Droplet size={48} className="mx-auto mb-4 opacity-20" />
-                    <p>Selecciona un píxel para ver la mezcla estandarizada.</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+    def _on_select(self, idx):
+        self.selected = idx
+        self.canvas.selected = idx
+        self.canvas.update()
+        self._render_palette()
+        self._render_recipe()
 
-        </div>
-      </div>
-    </div>
-  );
-};
+    # ---------------- controles ----------------
+    def _res_changed(self, v):
+        self.res_lbl.setText(f"Resolución: {v} px")
+        self._procesar()
 
-const MixBar = ({ label, color, value, textColor = "text-white" }) => {
-  if (value <= 0) return null;
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex justify-between text-xs">
-        <span className="text-slate-300">{label}</span>
-        <span className="font-mono text-slate-400">{value}%</span>
-      </div>
-      <div className="h-4 w-full bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full ${color} ${textColor} text-[10px] font-bold flex items-center justify-center transition-all duration-500`} style={{ width: `${value}%` }}></div>
-      </div>
-    </div>
-  );
-};
+    def _col_changed(self, v):
+        self.col_lbl.setText(f"Nº de colores: {v}")
+        self._procesar()
 
-export default PixelArtPainter;
+    def _opts(self):
+        self.canvas.show_grid = self.cb_grid.isChecked()
+        self.canvas.show_num = self.cb_num.isChecked()
+        self.canvas.highlight = self.cb_high.isChecked()
+        self.canvas.update()
+
+    # ---------------- exportar ----------------
+    def _descargar(self):
+        if self.cell_labels is None:
+            return
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar guía", "guia-pixelart.png", "PNG (*.png)")
+        if not ruta:
+            return
+        self.canvas.grab().save(ruta, "PNG")
+        self.status.setText(f"Guía guardada: {ruta}")
+
+    def _imprimible(self):
+        if self.cell_labels is None:
+            return
+        ruta, _ = QFileDialog.getSaveFileName(self, "Guardar guía imprimible", "guia-imprimible.png", "PNG (*.png)")
+        if not ruta:
+            return
+        canvas_pix = self.canvas.grab()
+        cw, ch = canvas_pix.width(), canvas_pix.height()
+        legend_rows = (len(self.palette) + 1) // 2
+        W = max(cw, 540)
+        H = ch + 60 + legend_rows * 34 + 20
+        out = QPixmap(W, H); out.fill(QColor("#ffffff"))
+        p = QPainter(out)
+        p.drawPixmap((W - cw) // 2, 10, canvas_pix)
+        p.setPen(QColor("#0f172a")); f = QFont("Segoe UI"); f.setPixelSize(16); f.setBold(True); p.setFont(f)
+        p.drawText(16, ch + 40, "Paleta de pinturas")
+        f2 = QFont("Segoe UI"); f2.setPixelSize(11); p.setFont(f2)
+        for i, col in enumerate(self.palette):
+            c, r = i % 2, i // 2
+            x = 16 + c * (W // 2 - 8); yy = ch + 54 + r * 34
+            p.setBrush(QColor(col["hex"])); p.setPen(QPen(QColor("#334155"), 1))
+            p.drawRect(x, yy, 26, 26)
+            rec = " ".join(f"{MIX_INFO[k][0][0]}{col['recipe'][k]}" for k in ("w", "c", "m", "y", "k") if col["recipe"][k] > 0)
+            p.setPen(QColor("#0f172a")); p.drawText(x + 34, yy + 12, f"#{i+1}  {col['hex']}  ({col['count']})")
+            p.setPen(QColor("#475569")); p.drawText(x + 34, yy + 25, rec)
+        p.end()
+        out.save(ruta, "PNG")
+        self.status.setText(f"Guía imprimible guardada: {ruta}")
+
+
+ESTILO = """
+* { font-family: 'Segoe UI'; }
+QWidget { background: #0f172a; color: #e2e8f0; font-size: 13px; }
+QLabel#h1 { font-size: 22px; font-weight: 800; color: #f8fafc; }
+QLabel#h3 { font-size: 14px; font-weight: 700; color: #f8fafc; }
+QLabel#muted { color: #94a3b8; font-size: 12px; }
+QLabel#ctl { color: #e2e8f0; font-weight: 600; font-size: 12px; }
+QLabel#status { color: #94a3b8; padding-top: 6px; border-top: 1px solid #1e293b; }
+QLabel#ph { color: #475569; font-size: 18px; }
+QLabel#pnum { background: #0f172a; border: 1px solid #334155; border-radius: 6px; font-weight: 700; font-size: 11px; }
+QFrame#card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+QFrame#paint { border-radius: 8px; }
+QFrame#paint:hover { background: #0f172a; }
+QScrollArea#cscroll, QScrollArea#palscroll { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+QScrollArea#cscroll > QWidget > QWidget { background: #1e293b; }
+QPushButton#accent { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #ec4899, stop:1 #8b5cf6);
+  color: #fff; border: none; border-radius: 10px; padding: 10px; font-weight: 700; }
+QPushButton#ghost { background: #334155; color: #fff; border: none; border-radius: 10px; padding: 10px; font-weight: 700; }
+QPushButton#ghost:hover { background: #475569; }
+QPushButton:disabled { background: #1e293b; color: #475569; }
+QCheckBox { color: #e2e8f0; font-weight: 600; padding: 4px 0; }
+QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px; border: 1px solid #334155; background: #0f172a; }
+QCheckBox::indicator:checked { background: #8b5cf6; border-color: #8b5cf6; }
+QSlider::groove:horizontal { height: 5px; background: #334155; border-radius: 3px; }
+QSlider::handle:horizontal { background: #8b5cf6; width: 15px; height: 15px; margin: -6px 0; border-radius: 8px; }
+"""
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(ESTILO)
+    v = PixelPainter()
+    v.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
