@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>PixelPainter Lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    :root {
+      --bg: #0f172a; --card: #1e293b; --card2: #0f172a; --border: #334155;
+      --text: #e2e8f0; --muted: #94a3b8; --violet: #8b5cf6; --pink: #ec4899;
+      --green: #34d399; --yellow: #facc15;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh; padding: 20px 16px 60px;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    header { text-align: center; margin-bottom: 22px; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.4rem); font-weight: 800;
+      background: linear-gradient(90deg, var(--pink), var(--violet));
+      -webkit-background-clip: text; background-clip: text; color: transparent; }
+    header p { color: var(--muted); margin-top: 4px; font-size: 0.92rem; }
+
+    .layout { display: grid; grid-template-columns: 260px 1fr 300px; gap: 20px; align-items: start; }
+    @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 18px; }
+    .card h3 { font-size: 0.95rem; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    .muted { color: var(--muted); font-size: 0.8rem; line-height: 1.4; }
+
+    label.upload {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 120px; border: 2px dashed var(--border); border-radius: 12px; cursor: pointer;
+      color: var(--muted); transition: all .15s; text-align: center; gap: 6px;
+    }
+    label.upload:hover { background: rgba(139,92,246,0.08); border-color: var(--violet); color: var(--text); }
+    label.upload.hover { background: rgba(139,92,246,0.12); border-color: var(--violet); color: var(--text); }
+    input[type="file"] { display: none; }
+
+    .ctrl { margin-bottom: 16px; }
+    .ctrl-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .ctrl-head label { font-size: 0.85rem; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
+    .badge { font-size: 0.72rem; font-weight: 700; padding: 3px 8px; border-radius: 6px; color: #fff; }
+    .badge.violet { background: var(--violet); } .badge.yellow { background: #ca8a04; }
+    input[type="range"] { width: 100%; accent-color: var(--violet); cursor: pointer; height: 6px; }
+    .toggle-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+    .toggle-row label { font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .switch { width: 44px; height: 24px; border-radius: 999px; background: var(--border); position: relative; cursor: pointer; border: none; transition: background .15s; flex-shrink: 0; }
+    .switch.on { background: var(--violet); }
+    .switch.on.pink { background: var(--pink); }
+    .switch .knob { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left .15s; }
+    .switch.on .knob { left: 23px; }
+
+    button.btn { width: 100%; padding: 10px; border: none; border-radius: 10px; font-weight: 700; font-size: 0.85rem;
+      cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; }
+    button.btn.primary { background: #334155; color: #fff; } button.btn.primary:hover { background: #475569; }
+    button.btn.accent { background: linear-gradient(90deg, var(--pink), var(--violet)); color: #fff; }
+    button.btn.accent:hover { filter: brightness(1.08); }
+
+    .canvas-area { display: flex; flex-direction: column; align-items: center; min-height: 400px; }
+    .canvas-box { position: relative; border: 4px solid var(--card); border-radius: 12px; overflow: hidden; background: var(--card); box-shadow: 0 20px 45px rgba(0,0,0,0.4); }
+    canvas { display: block; cursor: crosshair; max-width: 100%; height: auto; }
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 400px; color: var(--muted); opacity: .5; gap: 12px; }
+    .hint { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7);
+      padding: 8px 14px; border-radius: 999px; font-size: 0.8rem; backdrop-filter: blur(4px); border: 1px solid var(--border); white-space: nowrap; pointer-events: none; }
+
+    /* paleta */
+    .palette { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; margin-top: 6px; }
+    .paint { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+    .paint:hover { background: var(--card2); }
+    .paint.sel { border-color: var(--violet); background: var(--card2); }
+    .paint .num { width: 22px; height: 22px; border-radius: 6px; background: var(--card2); border: 1px solid var(--border); font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .paint .sw { width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--border); flex-shrink: 0; }
+    .paint .meta { flex: 1; min-width: 0; }
+    .paint .hex { font-family: ui-monospace, monospace; font-size: 0.78rem; font-weight: 600; }
+    .paint .cnt { font-size: 0.72rem; color: var(--muted); }
+
+    .recipe-swatch { width: 100%; height: 56px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 10px; }
+    .mixbar { margin-bottom: 8px; }
+    .mixbar .top { display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 3px; }
+    .mixbar .track { height: 16px; background: var(--card2); border-radius: 999px; overflow: hidden; }
+    .mixbar .fill { height: 100%; border-radius: 999px; transition: width .3s; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: #0b1020; border: 1px solid var(--violet); padding: 10px 18px; border-radius: 999px;
+      font-size: 0.85rem; font-weight: 600; opacity: 0; pointer-events: none; transition: all .25s; z-index: 50; }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 22px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>PixelPainter Lab</h1>
+    <p>Convierte una imagen en una <strong>guía para pintar por números</strong>: elige cuántos
+      colores, y obtén la cuadrícula numerada y la receta de mezcla de cada pintura.</p>
+  </header>
+
+  <div class="layout">
+    <!-- CONTROLES -->
+    <div>
+      <div class="card">
+        <label class="upload" id="drop">
+          ⬆️ <span><strong>Sube tu imagen</strong></span>
+          <span class="muted">JPG, PNG · o arrástrala aquí</span>
+          <input type="file" id="file" accept="image/*">
+        </label>
+      </div>
+
+      <div class="card" id="controls" style="display:none;">
+        <div class="ctrl">
+          <div class="ctrl-head">
+            <label>🔲 Resolución</label><span class="badge violet" id="res-badge">40 px</span>
+          </div>
+          <input type="range" id="res" min="10" max="100" value="40">
+          <p class="muted">Ancho de la cuadrícula en celdas.</p>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-head">
+            <label>🎨 Nº de colores</label><span class="badge yellow" id="col-badge">12</span>
+          </div>
+          <input type="range" id="ncolors" min="2" max="24" value="12">
+          <p class="muted">Cuántas pinturas usarás (agrupa con K-means).</p>
+        </div>
+
+        <div style="border-top:1px solid var(--border); padding-top:8px; margin-top:4px;">
+          <div class="toggle-row">
+            <label>▦ Cuadrícula</label>
+            <button class="switch on" id="sw-grid"><span class="knob"></span></button>
+          </div>
+          <div class="toggle-row">
+            <label>#️⃣ Números</label>
+            <button class="switch on" id="sw-num"><span class="knob"></span></button>
+          </div>
+          <div class="toggle-row">
+            <label>✨ Resaltar iguales</label>
+            <button class="switch on pink" id="sw-high"><span class="knob"></span></button>
+          </div>
+        </div>
+
+        <button class="btn accent" id="download">⬇ Descargar guía (PNG)</button>
+        <button class="btn primary" id="download2">🖨 Guía imprimible (con leyenda)</button>
+      </div>
+    </div>
+
+    <!-- CANVAS -->
+    <div class="canvas-area">
+      <div class="canvas-box" id="canvas-box" style="display:none;">
+        <canvas id="canvas"></canvas>
+        <div class="hint" id="hint">👆 Toca un color para ver su receta</div>
+      </div>
+      <div class="empty" id="empty">🖌️<p>Sube una imagen para comenzar</p></div>
+    </div>
+
+    <!-- PALETA + RECETA -->
+    <div>
+      <div class="card" id="palette-card" style="display:none;">
+        <h3>🎨 Paleta (<span id="pal-count">0</span> pinturas)</h3>
+        <p class="muted">Clic en una pintura para resaltar sus celdas.</p>
+        <div class="palette" id="palette"></div>
+      </div>
+
+      <div class="card" id="recipe-card" style="display:none;">
+        <h3>🖌️ Receta de mezcla</h3>
+        <div class="recipe-swatch" id="rec-swatch"></div>
+        <p class="muted" style="margin-bottom:6px;">
+          Pintura <strong id="rec-num">#1</strong> · <span id="rec-hex" style="font-family:ui-monospace,monospace"></span>
+          · <strong id="rec-count" style="color:var(--green)">0</strong> celdas
+        </p>
+        <div id="mixbars" style="margin-top:10px;"></div>
+        <p class="muted" style="margin-top:8px;">Mezcla aproximada (pasos de 5%, suma 100%). La mezcla
+          física real puede variar según tus pinturas.</p>
+      </div>
+    </div>
+  </div>
+
+  <footer>PixelPainter Lab · todo se procesa en tu navegador · por <strong>KALEVI LATVA AIJO ALEGRIA</strong></footer>
+</div>
+<div class="toast" id="toast">Copiado</div>
+
+<script>
+/* ---------- K-means (cuantización de color) ---------- */
+function kmeans(vectors, k, maxIter = 30) {
+  const n = vectors.length;
+  if (n === 0 || k <= 0) return { labels: [], centroids: [] };
+  k = Math.min(k, n);
+  const dim = vectors[0].length;
+  const dist2 = (a, b) => { let s = 0; for (let j = 0; j < dim; j++) { const d = a[j] - b[j]; s += d * d; } return s; };
+  const centroids = [vectors[Math.floor(Math.random() * n)].slice()];
+  while (centroids.length < k) {
+    const d2 = vectors.map(v => { let m = Infinity; for (const c of centroids) { const d = dist2(v, c); if (d < m) m = d; } return m; });
+    const sum = d2.reduce((a, b) => a + b, 0);
+    let r = Math.random() * sum, idx = 0;
+    for (let i = 0; i < n; i++) { r -= d2[i]; if (r <= 0) { idx = i; break; } }
+    centroids.push(vectors[idx].slice());
+  }
+  const labels = new Array(n).fill(0);
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      let best = 0, bd = Infinity;
+      for (let c = 0; c < k; c++) { const d = dist2(vectors[i], centroids[c]); if (d < bd) { bd = d; best = c; } }
+      if (labels[i] !== best) { labels[i] = best; changed = true; }
+    }
+    const sums = Array.from({ length: k }, () => new Array(dim).fill(0)), counts = new Array(k).fill(0);
+    for (let i = 0; i < n; i++) { counts[labels[i]]++; for (let j = 0; j < dim; j++) sums[labels[i]][j] += vectors[i][j]; }
+    for (let c = 0; c < k; c++) if (counts[c] > 0) for (let j = 0; j < dim; j++) centroids[c][j] = sums[c][j] / counts[c];
+    if (!changed && iter > 0) break;
+  }
+  return { labels, centroids };
+}
+
+const rgbToHex = (r, g, b) => "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("").toUpperCase();
+
+/* ---------- Receta de mezcla normalizada (suma 100%, pasos de 5%) ---------- */
+function recipe(r, g, b) {
+  const R = r / 255, G = g / 255, B = b / 255;
+  const k = 1 - Math.max(R, G, B);              // oscuridad -> negro
+  const denom = (1 - k) || 1;
+  const c = (1 - R - k) / denom, m = (1 - G - k) / denom, y = (1 - B - k) / denom;
+  const w = Math.min(R, G, B);                  // claridad -> blanco
+  const raw = { w: w, c: c * (1 - w), m: m * (1 - w), y: y * (1 - w), k: k };
+  const sum = raw.w + raw.c + raw.m + raw.y + raw.k || 1;
+  // normalizar a % y redondear a 5 con ajuste para sumar 100
+  let arr = Object.keys(raw).map(key => ({ key, v: raw[key] / sum * 100 }));
+  arr = arr.map(p => ({ key: p.key, v: Math.round(p.v / 5) * 5 }));
+  let total = arr.reduce((s, p) => s + p.v, 0);
+  arr.sort((a, b2) => b2.v - a.v);
+  let i = 0, guard = 0;
+  while (total !== 100 && guard++ < 60) {
+    const p = arr[i % arr.length];
+    if (total < 100) { p.v += 5; total += 5; }
+    else if (p.v >= 5) { p.v -= 5; total -= 5; }
+    i++;
+  }
+  const out = {}; arr.forEach(p => out[p.key] = p.v); return out;
+}
+
+const MIX_INFO = { w: ["Blanco", "#f8fafc"], c: ["Cian", "#06b6d4"], m: ["Magenta", "#d946ef"], y: ["Amarillo", "#facc15"], k: ["Negro", "#0f172a"] };
+
+/* ---------- Estado ---------- */
+const state = { img: null, cols: 40, ncolors: 12, showGrid: true, showNum: true, highlight: true, selected: null };
+let rows = 0;
+let cellLabels = [];      // etiqueta (índice de paleta) por celda
+let palette = [];         // [{r,g,b,hex,count,recipe}]
+const DISPLAY_W = 520;
+
+const $ = id => document.getElementById(id);
+const canvas = $("canvas"), ctx = canvas.getContext("2d");
+const toast = (msg) => { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 1400); };
+
+/* ---------- Carga de imagen ---------- */
+function loadFile(f) {
+  if (!f || !f.type.startsWith("image/")) { toast("Eso no es una imagen"); return; }
+  const reader = new FileReader();
+  reader.onload = () => { const img = new Image(); img.onload = () => { state.img = img; state.selected = null; showUI(); procesar(); }; img.src = reader.result; };
+  reader.readAsDataURL(f);
+}
+function showUI() {
+  $("controls").style.display = "block";
+  $("palette-card").style.display = "block";
+  $("canvas-box").style.display = "block";
+  $("empty").style.display = "none";
+}
+
+/* ---------- Procesamiento: pixelar + cuantizar ---------- */
+function procesar() {
+  const img = state.img; if (!img) return;
+  const aspect = img.width / img.height;
+  state.cols = parseInt($("res").value, 10);
+  rows = Math.max(1, Math.round(state.cols / aspect));
+
+  // muestrear la imagen a la cuadrícula
+  const tmp = document.createElement("canvas"); tmp.width = state.cols; tmp.height = rows;
+  const tctx = tmp.getContext("2d"); tctx.imageSmoothingEnabled = true;
+  tctx.drawImage(img, 0, 0, state.cols, rows);
+  const data = tctx.getImageData(0, 0, state.cols, rows).data;
+
+  const cellColors = [];
+  for (let i = 0; i < data.length; i += 4) cellColors.push([data[i], data[i + 1], data[i + 2]]);
+
+  // cuantizar a N colores con K-means
+  const k = Math.min(parseInt($("ncolors").value, 10), cellColors.length);
+  const { labels, centroids } = kmeans(cellColors, k);
+  const counts = new Array(centroids.length).fill(0);
+  labels.forEach(l => counts[l]++);
+
+  // reordenar paleta por frecuencia (número 1 = el color más usado)
+  const orden = centroids.map((_, i) => i).filter(i => counts[i] > 0).sort((a, b) => counts[b] - counts[a]);
+  const remap = {}; orden.forEach((old, nuevo) => remap[old] = nuevo);
+  cellLabels = labels.map(l => remap[l]);
+  palette = orden.map(old => {
+    const [r, g, b] = centroids[old].map(v => Math.round(v));
+    return { r, g, b, hex: rgbToHex(r, g, b), count: counts[old], recipe: recipe(r, g, b) };
+  });
+
+  if (state.selected !== null && state.selected >= palette.length) state.selected = null;
+  render(); renderPalette(); renderRecipe();
+}
+
+/* ---------- Dibujo ---------- */
+function cellSize() { const cw = DISPLAY_W / state.cols; return { cw, ch: cw, W: DISPLAY_W, H: cw * rows }; }
+
+function render() {
+  const { cw, ch, W, H } = cellSize();
+  canvas.width = W; canvas.height = H;
+  // celdas
+  for (let y = 0; y < rows; y++) for (let x = 0; x < state.cols; x++) {
+    const lab = cellLabels[y * state.cols + x];
+    ctx.fillStyle = palette[lab].hex;
+    ctx.fillRect(x * cw, y * ch, cw + 0.5, ch + 0.5);
+  }
+  // resaltar seleccionado
+  if (state.highlight && state.selected !== null) {
+    const p = palette[state.selected];
+    const dark = (p.r + p.g + p.b) / 3 < 128;
+    ctx.strokeStyle = dark ? "#22ff88" : "#ff2fd6"; ctx.lineWidth = 2;
+    ctx.fillStyle = dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.22)";
+    for (let y = 0; y < rows; y++) for (let x = 0; x < state.cols; x++) {
+      if (cellLabels[y * state.cols + x] === state.selected) {
+        ctx.fillRect(x * cw, y * ch, cw, ch);
+        ctx.strokeRect(x * cw + 1, y * ch + 1, cw - 2, ch - 2);
+      }
+    }
+  }
+  // cuadrícula
+  if (state.showGrid) {
+    ctx.strokeStyle = "rgba(120,130,150,0.35)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= state.cols; i++) { ctx.moveTo(i * cw, 0); ctx.lineTo(i * cw, H); }
+    for (let i = 0; i <= rows; i++) { ctx.moveTo(0, i * ch); ctx.lineTo(W, i * ch); }
+    ctx.stroke();
+  }
+  // números
+  if (state.showNum && cw >= 9) {
+    ctx.font = `${Math.max(6, Math.min(cw, ch) * 0.5)}px system-ui`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let y = 0; y < rows; y++) for (let x = 0; x < state.cols; x++) {
+      const lab = cellLabels[y * state.cols + x], p = palette[lab];
+      ctx.fillStyle = (p.r + p.g + p.b) / 3 < 128 ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.65)";
+      ctx.fillText(String(lab + 1), x * cw + cw / 2, y * ch + ch / 2);
+    }
+  }
+}
+
+function renderPalette() {
+  $("pal-count").textContent = palette.length;
+  $("palette").innerHTML = palette.map((p, i) => `
+    <div class="paint ${state.selected === i ? "sel" : ""}" data-i="${i}">
+      <div class="num">${i + 1}</div>
+      <div class="sw" style="background:${p.hex}"></div>
+      <div class="meta"><div class="hex">${p.hex}</div><div class="cnt">${p.count} celdas</div></div>
+    </div>`).join("");
+}
+
+function renderRecipe() {
+  const card = $("recipe-card");
+  if (state.selected === null) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  const p = palette[state.selected];
+  $("rec-swatch").style.background = p.hex;
+  $("rec-num").textContent = "#" + (state.selected + 1);
+  $("rec-hex").textContent = p.hex;
+  $("rec-count").textContent = p.count;
+  const order = ["w", "c", "m", "y", "k"];
+  $("mixbars").innerHTML = order.filter(key => p.recipe[key] > 0).map(key => {
+    const [name, col] = MIX_INFO[key];
+    return `<div class="mixbar"><div class="top"><span>${name}</span><span style="color:var(--muted);font-family:ui-monospace,monospace">${p.recipe[key]}%</span></div>
+      <div class="track"><div class="fill" style="width:${p.recipe[key]}%;background:${col}"></div></div></div>`;
+  }).join("") || `<p class="muted">Color puro, sin mezcla.</p>`;
+}
+
+/* ---------- Interacción ---------- */
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scale = canvas.width / rect.width;
+  const { cw, ch } = cellSize();
+  const x = Math.floor((e.clientX - rect.left) * scale / cw), y = Math.floor((e.clientY - rect.top) * scale / ch);
+  if (x < 0 || x >= state.cols || y < 0 || y >= rows) return;
+  state.selected = cellLabels[y * state.cols + x];
+  $("hint").style.display = "none";
+  render(); renderPalette(); renderRecipe();
+});
+$("palette").addEventListener("click", (e) => {
+  const el = e.target.closest(".paint"); if (!el) return;
+  state.selected = parseInt(el.dataset.i, 10);
+  $("hint").style.display = "none";
+  render(); renderPalette(); renderRecipe();
+});
+
+$("res").addEventListener("input", (e) => { $("res-badge").textContent = e.target.value + " px"; procesar(); });
+$("ncolors").addEventListener("input", (e) => { $("col-badge").textContent = e.target.value; procesar(); });
+function bindSwitch(id, key, cls) {
+  $(id).addEventListener("click", () => { state[key] = !state[key]; $(id).classList.toggle("on", state[key]); render(); });
+}
+bindSwitch("sw-grid", "showGrid"); bindSwitch("sw-num", "showNum"); bindSwitch("sw-high", "highlight");
+
+/* ---------- Descargas ---------- */
+$("download").addEventListener("click", () => {
+  const a = document.createElement("a"); a.download = "guia-pixelart.png"; a.href = canvas.toDataURL(); a.click();
+  toast("Guía descargada");
+});
+$("download2").addEventListener("click", () => {
+  // lienzo con la guía + leyenda de paleta
+  const legendH = 40 + Math.ceil(palette.length / 2) * 34 + 30;
+  const out = document.createElement("canvas");
+  out.width = Math.max(canvas.width, 520); out.height = canvas.height + legendH + 20;
+  const o = out.getContext("2d");
+  o.fillStyle = "#ffffff"; o.fillRect(0, 0, out.width, out.height);
+  o.drawImage(canvas, (out.width - canvas.width) / 2, 10);
+  o.fillStyle = "#0f172a"; o.font = "bold 16px system-ui"; o.textAlign = "left";
+  o.fillText("Paleta de pinturas", 16, canvas.height + 38);
+  o.font = "12px system-ui";
+  palette.forEach((p, i) => {
+    const col = i % 2, row = Math.floor(i / 2);
+    const x = 16 + col * (out.width / 2 - 8), yy = canvas.height + 54 + row * 34;
+    o.fillStyle = p.hex; o.strokeStyle = "#334155"; o.lineWidth = 1;
+    o.fillRect(x, yy, 26, 26); o.strokeRect(x, yy, 26, 26);
+    o.fillStyle = "#0f172a"; o.textBaseline = "middle";
+    const rec = Object.keys(MIX_INFO).filter(k => p.recipe[k] > 0).map(k => MIX_INFO[k][0][0] + p.recipe[k]).join(" ");
+    o.fillText(`#${i + 1}  ${p.hex}  (${p.count})`, x + 34, yy + 8);
+    o.fillStyle = "#475569"; o.fillText(rec, x + 34, yy + 21);
+  });
+  const a = document.createElement("a"); a.download = "guia-imprimible.png"; a.href = out.toDataURL(); a.click();
+  toast("Guía imprimible descargada");
+});
+
+/* ---------- Archivo / drag&drop ---------- */
+$("file").addEventListener("change", (e) => loadFile(e.target.files[0]));
+const drop = $("drop");
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hover"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hover"); }));
+drop.addEventListener("drop", (e) => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+</script>
+</body>
+</html>
